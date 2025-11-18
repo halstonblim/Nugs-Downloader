@@ -44,11 +44,23 @@ while IFS= read -r -d '' album_folder; do
   # Get the folder name without the path
   folder_name=$(basename "$album_folder")
   
-  # Extract album name (everything after " - ")
-  if [[ "$folder_name" =~ ^.*\ -\ (.*)$ ]]; then
-    album_name="${BASH_REMATCH[1]}"
+  # Extract artist name (everything before first " - ")
+  # Pattern: [Artist] - [Album Info]
+  if [[ "$folder_name" =~ ^([^-]+)\ -\ (.*)$ ]]; then
+    artist_name="${BASH_REMATCH[1]}"
+    album_part="${BASH_REMATCH[2]}"
+    
+    # Check if there's a trailing " - [Location]" pattern (ends with ", XX" for state/country)
+    if [[ "$album_part" =~ ^(.*)\ -\ [^-]+,\ [A-Z]{2}$ ]]; then
+      # Remove the " - Location" suffix
+      album_name="${BASH_REMATCH[1]}"
+    else
+      # No location suffix, use the whole album part
+      album_name="$album_part"
+    fi
     
     echo "Processing album: $album_name"
+    echo "  Artist: $artist_name"
     echo "  Folder: $folder_name"
     
     # Count .m4a files in this folder (excluding ._ files)
@@ -64,8 +76,8 @@ while IFS= read -r -d '' album_folder; do
     find "$album_folder" -maxdepth 1 -type f -name "*.m4a" ! -name "._*" | while read -r audio_file; do
       echo "    Updating: $(basename "$audio_file")"
       
-      # Update the album tag
-      AtomicParsley "$audio_file" --album "$album_name" --overWrite &> /dev/null
+      # Update the album and artist tags
+      AtomicParsley "$audio_file" --artist "$artist_name" --album "$album_name" --overWrite &> /dev/null
       
       if [ $? -ne 0 ]; then
         echo "    Error updating file: $(basename "$audio_file")"
