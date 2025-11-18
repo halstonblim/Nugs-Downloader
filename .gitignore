@@ -1,0 +1,43 @@
+# Configuration files (likely contain sensitive credentials)
+config.json
+.config.json
+
+# Go binaries
+nugs_dl
+nugs_dl_*
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test and coverage files
+*.test
+*.out
+coverage.txt
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# Text files (downloads/artist lists)
+*.txt
+
+# TypeScript temporary files
+*.ts
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Vendor directory (if using Go modules)
+vendor/

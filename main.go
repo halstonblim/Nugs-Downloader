@@ -6,7 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
-	"encoding/hex"
+	// "encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -775,55 +775,160 @@ func tsToAac(decData []byte, outPath, ffmpegNameStr string) error {
 	return nil
 }
 
+// Replace the hlsOnly function in main.go with this improved version
+// This fixes the skipping issue by using proper FFmpeg HLS handling
 
-func hlsOnly(trackPath, manUrl, ffmpegNameStr string) error {
-	req, err := client.Get(manUrl)
+func hlsOnly(trackPath, m3u8Url, ffmpegNameStr string) error {
+	fmt.Println("HLS-only track. Only AAC is available, tags currently unsupported.")
+	
+	var errBuffer bytes.Buffer
+	
+	// Method 1: Let FFmpeg handle HLS directly with proper protocol options
+	// This is the most reliable method as FFmpeg natively understands HLS
+	cmd := exec.Command(
+		ffmpegNameStr,
+		"-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+		"-i", m3u8Url,
+		"-c", "copy",                    // Copy without re-encoding
+		"-bsf:a", "aac_adtstoasc",       // Convert ADTS to ASC format
+		"-y",                             // Overwrite output file
+		trackPath,
+	)
+	
+	cmd.Stderr = &errBuffer
+	err := cmd.Run()
+	
 	if err != nil {
-		return err
+		// If Method 1 fails, try Method 2: Manual segment download and concat
+		fmt.Println("Direct HLS download failed, trying manual segment concatenation...")
+		return hlsOnlyManual(trackPath, m3u8Url, ffmpegNameStr)
 	}
-	defer req.Body.Close()
-	if req.StatusCode != http.StatusOK {
-		return errors.New(req.Status)
-	}
-	playlist, _, err := m3u8.DecodeFrom(req.Body, true)
-	if err != nil {
-		return err
-	}
-	media := playlist.(*m3u8.MediaPlaylist)
-
-	manBase, q, err := getManifestBase(manUrl)
-	if err != nil {
-		return err
-	}
-	tsUrl := manBase + media.Segments[0].URI + q
-
-	key := media.Key
-	keyBytes, err := getKey(manBase + key.URI)
-	if err != nil {
-		return err
-	}
-
-	iv, err := hex.DecodeString(key.IV[2:])
-	if err != nil {
-		return err
-	}
-
-	err = downloadTrack("temp_enc.ts", tsUrl)
-	if err != nil {
-		return err
-	}
-	decData, err := decryptTrack(keyBytes, iv)
-	if err != nil {
-		return err
-	}
-	err = os.Remove("temp_enc.ts")
-	if err != nil {
-		return err
-	}
-	err = tsToAac(decData, trackPath, ffmpegNameStr)
-	return err
+	
+	return nil
 }
 
+// Alternative method: Download segments manually and concatenate with proper demuxer
+func hlsOnlyManual(trackPath, m3u8Url, ffmpegNameStr string) error {
+	// Create temp directory for segments
+	tempDir, err := os.MkdirTemp("", "nugs_hls_*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+	
+	// Parse m3u8 playlist
+	resp, err := client.Get(m3u8Url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	playlist, listType, err := m3u8.DecodeFrom(resp.Body, true)
+	if err != nil {
+		return err
+	}
+	
+	if listType != m3u8.MEDIA {
+		return errors.New("expected media playlist")
+	}
+	
+	mediaPlaylist := playlist.(*m3u8.MediaPlaylist)
+	
+	// Get base URL for segments
+	baseUrl := m3u8Url[:strings.LastIndex(m3u8Url, "/")+1]
+	
+	// Download all segments
+	segmentFiles := []string{}
+	for i, segment := range mediaPlaylist.Segments {
+		if segment == nil {
+			break
+		}
+		
+		segmentUrl := segment.URI
+		if !strings.HasPrefix(segmentUrl, "http") {
+			segmentUrl = baseUrl + segmentUrl
+		}
+		
+		segmentPath := filepath.Join(tempDir, fmt.Sprintf("segment_%05d.ts", i))
+		
+		err = downloadSegment(segmentUrl, segmentPath)
+		if err != nil {
+			return fmt.Errorf("failed to download segment %d: %w", i, err)
+		}
+		
+		segmentFiles = append(segmentFiles, segmentPath)
+		fmt.Printf("\rDownloading segment %d/%d", i+1, len(mediaPlaylist.Segments))
+	}
+	fmt.Println()
+	
+	// Create concat file for FFmpeg
+	concatFile := filepath.Join(tempDir, "concat.txt")
+	f, err := os.Create(concatFile)
+	if err != nil {
+		return err
+	}
+	
+	for _, segFile := range segmentFiles {
+		// Use absolute paths and proper escaping
+		absPath, _ := filepath.Abs(segFile)
+		// Escape single quotes in path
+		escapedPath := strings.ReplaceAll(absPath, "'", "'\\''")
+		_, err = f.WriteString(fmt.Sprintf("file '%s'\n", escapedPath))
+		if err != nil {
+			f.Close()
+			return err
+		}
+	}
+	f.Close()
+	
+	// Concatenate segments using FFmpeg concat demuxer
+	// This method properly handles timing information
+	var errBuffer bytes.Buffer
+	cmd := exec.Command(
+		ffmpegNameStr,
+		"-f", "concat",
+		"-safe", "0",
+		"-i", concatFile,
+		"-c", "copy",                    // Copy streams without re-encoding
+		"-bsf:a", "aac_adtstoasc",       // Fix AAC format
+		"-fflags", "+genpts",             // Generate presentation timestamps
+		"-avoid_negative_ts", "make_zero", // Fix negative timestamps
+		"-y",
+		trackPath,
+	)
+	
+	cmd.Stderr = &errBuffer
+	err = cmd.Run()
+	
+	if err != nil {
+		errString := fmt.Sprintf("%s\n%s", err, errBuffer.String())
+		return errors.New(errString)
+	}
+	
+	return nil
+}
+
+// Helper function to download a single segment
+func downloadSegment(url, outputPath string) error {
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+	
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
 func checkIfHlsOnly(quals []*Quality) bool {
 	for _, quality := range quals {
 		if !strings.Contains(quality.URL, ".m3u8?") {

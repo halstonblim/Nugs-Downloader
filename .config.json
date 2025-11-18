@@ -1,0 +1,9 @@
+{
+    "email": "",
+    "password": "",
+    "format": 4,
+    "videoFormat": 5,
+    "outPath": "",
+    "token": "",
+    "useFfmpegEnvVar": true
+}
